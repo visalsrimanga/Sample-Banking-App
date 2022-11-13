@@ -5,6 +5,7 @@ import jakarta.json.Json;
 import jakarta.json.JsonException;
 import jakarta.json.JsonObject;
 import jakarta.json.bind.JsonbBuilder;
+import jakarta.json.bind.JsonbException;
 import jakarta.json.stream.JsonParser;
 import jakarta.servlet.*;
 import jakarta.servlet.http.*;
@@ -16,10 +17,12 @@ import lk.ijse.dep9.dto.TransactionDTO;
 import javax.sql.DataSource;
 import java.io.IOException;
 import java.io.StringReader;
+import java.io.StringWriter;
 import java.math.BigDecimal;
 import java.rmi.RemoteException;
 import java.sql.*;
 import java.util.Date;
+import java.util.jar.JarException;
 
 @WebServlet(name = "TransactionServlet", value = "/transactions/*", loadOnStartup = 0)
 public class TransactionServlet extends HttpServlet {
@@ -96,7 +99,7 @@ public class TransactionServlet extends HttpServlet {
                 if(stmUpdate.executeUpdate() != 1) throw new SQLException("Fail to update the balance");
 
                 PreparedStatement stmNewTransaction = connection.prepareStatement
-                        ("INSERT INTO Transactions (account, type, description, amount, date) VALUES (?,?,?,?,?)");
+                        ("INSERT INTO Transaction (account, type, description, amount, date) VALUES (?,?,?,?,?)");
 
                 stmNewTransaction.setString(1, transactionDTO.getAccount());
                 stmNewTransaction.setString(2, "CREDIT");
@@ -171,7 +174,7 @@ public class TransactionServlet extends HttpServlet {
                 stmWithdraw.executeUpdate();
 
                 PreparedStatement stmNewTransaction = connection.prepareStatement
-                        ("INSERT INTO Transactions (account, type, description, amount, date) VALUES (?,?,?,?,?)");
+                        ("INSERT INTO Transaction (account, type, description, amount, date) VALUES (?,?,?,?,?)");
 
                 stmNewTransaction.setString(1, withdrawDTO.getAccount());
                 stmNewTransaction.setString(2, "DEBIT");
@@ -224,11 +227,81 @@ public class TransactionServlet extends HttpServlet {
 
             Connection connection = pool.getConnection();
 
-            PreparedStatement stm = connection.prepareStatement
-                    ("SELECT * FROM Account WHERE account_number = ?");
-            stm.setString(1, transferDTO.getFrom());
-            ResultSet rst = stm.executeQuery();
-            if(!rst.next()) throw new RuntimeException("Invalid account number!");
+            PreparedStatement stm1 = connection.prepareStatement("SELECT * FROM Account WHERE account_number = ?");
+            stm1.setString(1, transferDTO.getFrom());
+            ResultSet rst1;
+            synchronized (this){
+                rst1 = stm1.executeQuery();
+            }
+            if(!rst1.next()) throw new JsonException("Invalid account number!");
+
+            PreparedStatement stm2 = connection.prepareStatement("SELECT * FROM Account WHERE account_number = ?");
+            stm2.setString(1, transferDTO.getTo());
+            ResultSet rst2 = stm2.executeQuery();
+            if(!rst2.next()) throw new JsonException("Invalid account number!");
+
+            BigDecimal fromAccBalance = rst1.getBigDecimal("balance");
+            BigDecimal toAccBalance = rst2.getBigDecimal("balance");
+
+            if (fromAccBalance.subtract(transferDTO.getAmount()).compareTo(new BigDecimal(100)) < 0){
+                throw new JsonException("Insufficient account balance");
+            }
+
+            try{
+                connection.setAutoCommit(false);
+
+                PreparedStatement withdrawStm = connection.prepareStatement
+                        ("UPDATE Account SET balance = ? WHERE account_number = ?");
+                withdrawStm.setBigDecimal(1, fromAccBalance.subtract(transferDTO.getAmount()));
+                withdrawStm.setString(2, transferDTO.getFrom());
+                if (withdrawStm.executeUpdate() != 1) throw new JsonException("Error occurred while depositing the money");
+
+                PreparedStatement withdrawLog = connection.prepareStatement
+                        ("INSERT INTO Transaction (account, type, description, amount, date) VALUES (?,?,?,?,?)");
+                withdrawLog.setString(1, transferDTO.getFrom());
+                withdrawLog.setString(2, "DEBIT");
+                withdrawLog.setString(3, "Debit");
+                withdrawLog.setBigDecimal(4, transferDTO.getAmount());
+                withdrawLog.setTimestamp(5, new Timestamp(new Date().getTime()));
+                if (withdrawLog.executeUpdate() != 1) throw new JsonException("Error while recording the transaction");
+
+                PreparedStatement depositStm = connection.prepareStatement
+                        ("UPDATE Account SET balance = ? WHERE account_number = ?");
+                depositStm.setBigDecimal(1, toAccBalance.add(transferDTO.getAmount()));
+                depositStm.setString(2, transferDTO.getTo());
+                if (depositStm.executeUpdate() != 1) throw new JsonException("Error occurred while depositing the money");
+
+                PreparedStatement depositLog = connection.prepareStatement
+                        ("INSERT INTO Transaction (account, type, description, amount, date) VALUES (?,?,?,?,?)");
+                depositLog.setString(1, transferDTO.getTo());
+                depositLog.setString(2, "CREDIT");
+                depositLog.setString(3, "Credit");
+                depositLog.setBigDecimal(4, transferDTO.getAmount());
+                depositLog.setTimestamp(5, new Timestamp(new Date().getTime()));
+                if (depositLog.executeUpdate() != 1) throw new JsonException("Fail to add credit transaction records");
+
+                connection.commit();
+
+                ResultSet resultSet = stm1.executeQuery();
+                resultSet.next();
+                String name = resultSet.getString("holder_name");
+                String address = resultSet.getString("holder_address");
+                BigDecimal balance = resultSet.getBigDecimal("balance");
+                AccountDTO accountDTO = new AccountDTO(transferDTO.getFrom(), name, address, balance);
+
+                resp.setStatus(HttpServletResponse.SC_CREATED);
+                resp.setContentType("application/json");
+                JsonbBuilder.create().toJson(accountDTO, resp.getWriter());
+
+            } catch (Throwable t){
+                connection.rollback();
+                t.printStackTrace();
+                resp.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+                        "Fail to transfer the money, please contact the bank");
+            } finally {
+                connection.setAutoCommit(true);
+            }
+            connection.close();
 
         } catch (SQLException e) {
             e.printStackTrace();
