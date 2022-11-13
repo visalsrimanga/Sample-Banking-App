@@ -54,7 +54,7 @@ public class AccountServlet extends HttpServlet {
             accountDTO.setBalance(BigDecimal.ZERO);
 
             PreparedStatement stm = connection.prepareStatement
-                    ("INSERT INTO account (account_number, holder_name, holder_address) VALUES (?,?,?)");
+                    ("INSERT INTO Account (account_number, holder_name, holder_address) VALUES (?,?,?)");
             stm.setString(1, accountDTO.getAccount());
             stm.setString(2, accountDTO.getName());
             stm.setString(3, accountDTO.getAddress());
